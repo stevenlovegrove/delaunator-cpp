@@ -8,8 +8,321 @@
 #include <memory>
 #include <utility>
 #include <vector>
+#include <set>
+
+#ifdef HAVE_EIGEN
+#   include <Eigen/Core>
+#endif
 
 namespace delaunator {
+
+constexpr double EPSILON = std::numeric_limits<double>::epsilon();
+constexpr std::size_t INVALID_INDEX = std::numeric_limits<std::size_t>::max();
+
+class Delaunator {
+
+public:
+    inline Delaunator(std::vector<double>& in_coords)
+    {
+        if(in_coords.size() % 2 != 0) {
+            throw std::invalid_argument("Argument must have an even number of coorinates");
+        }
+        triangulate(in_coords.data(), in_coords.size() / 2);
+    }
+
+    inline Delaunator(double* coords, size_t num_points)
+    {
+        triangulate(coords, num_points);
+    }
+
+#ifdef HAVE_EIGEN
+    inline Delaunator(Eigen::Matrix<double,2,Eigen::Dynamic>& points)
+    {
+        triangulate(points.data(), points.cols());
+    }
+    inline Delaunator(std::vector<Eigen::Vector2d>& points)
+    {
+        triangulate((double*)points.data(), points.size());
+    }
+#endif // HAVE_EIGEN
+
+    double get_hull_area();
+
+    inline size_t get_num_points() const
+    {
+        return num_points;
+    }
+
+    inline size_t get_num_halfedges() const
+    {
+        return triangles.size();
+    }
+
+    inline size_t get_num_edges() const
+    {
+        return triangles.size() / 2;
+    }
+
+    inline size_t get_num_triangles() const
+    {
+        return triangles.size() / 3;
+    }
+
+    // Triangle index, t \in [0, get_num_triangles()-1]
+    // Halfedge index, e \in [0,1,2]
+    // Returns halfedge index \in [0, get_num_halfedges()-1]
+    static inline size_t edge_of_triangle(size_t t, size_t e) {
+        return 3 * t + e;
+    }
+
+    // Halfedge index, e \in [0, get_num_halfedges()-1]
+    // Returns triangle index \in [0, get_num_triangles()-1]
+    static inline size_t triangle_of_edge(size_t e)  {
+        return e / 3;
+    }
+
+    // Halfedge index, e \in [0, get_num_halfedges()-1]
+    // Returns haldedge index \in [0, get_num_halfedges()-1]
+    static inline size_t next_halfedge(size_t e) {
+        return (e % 3 == 2) ? (e - 2) : (e + 1);
+    }
+
+    // e \in [0, get_num_halfedges()-1]
+    // Returns haldedge index \in [0, get_num_halfedges()-1]
+    static inline size_t prev_halfedge(size_t e) {
+        return (e % 3 == 0) ? (e + 2) : (e - 1);
+    }
+
+    // e \in [0, get_num_halfedges()-1]
+    // vi \in [0,1]
+    inline size_t get_point_of_edge(size_t e, size_t vi) const
+    {
+        return triangles[vi == 0 ? e : next_halfedge(e)];
+    }
+
+    // t \in [0, get_num_triangles()-1]
+    // vi \in [0,1,2]
+    inline size_t get_point_of_triangle(size_t t, size_t vi) const
+    {
+        return triangles[edge_of_triangle(t, vi)];
+    }
+
+    // e \in [0, get_num_halfedges()-1]
+    // Returns point index \in [0, get_total_num_points()-1]
+    inline size_t get_point_opposite_of_halfedge(size_t e) const
+    {
+        return triangles[prev_halfedge(e)];
+    }
+
+    // e \in [0, get_num_halfedges()-1]
+    // Returns point index \in [0, get_total_num_points()-1]
+    inline size_t get_point_at_halfedge_start(size_t e) const
+    {
+        return triangles[e];
+    }
+
+    // e \in [0, get_num_halfedges()-1]
+    // Returns point index \in [0, get_total_num_points()-1]
+    inline size_t get_point_at_halfedge_end(size_t e) const
+    {
+        return triangles[next_halfedge(e)];
+    }
+
+    // e \in [0, get_num_halfedges()-1]
+    // Returns halfedge index opposite to e, or INVALID_INDEX iff
+    // this half-edge lies on a boundary
+    inline size_t get_opposite_halfedge(size_t e) const
+    {
+        return halfedges[e];
+    }
+
+#ifdef HAVE_EIGEN
+    // Return the coordinates of point with index pi
+    inline Eigen::Vector2d get_point(size_t pi) const
+    {
+        return Eigen::Vector2d(coords[2*pi+0], coords[2*pi+1]);
+    }
+
+    // Return the point indices that make up halfedge ei
+    inline Eigen::Vector2i get_halfedge(size_t ei) const
+    {
+        return Eigen::Vector2i(
+            triangles[ei],
+            triangles[next_halfedge(ei)]
+        );
+    }
+
+    // Return the point indices that make up triangle ti
+    inline Eigen::Vector3i get_triangle(size_t ti) const
+    {
+        return Eigen::Vector3i(
+            get_point_of_triangle(ti, 0),
+            get_point_of_triangle(ti, 1),
+            get_point_of_triangle(ti, 2)
+        );
+    }
+
+    // Return the point indices that make up quad defined by
+    // one of the interior halfedges ei
+    // Points are defined in ring around perimeter starting.
+    inline Eigen::Vector4i get_quad(size_t e) const
+    {
+        size_t oppe = get_opposite_halfedge(e);
+        return Eigen::Vector4i(
+            get_point_at_halfedge_start(e),
+            get_point_opposite_of_halfedge(e),
+            get_point_at_halfedge_start(oppe),
+            get_point_opposite_of_halfedge(oppe)
+        );
+    }
+#endif
+
+    // Edge Visitation
+    // Will call func(index, x, y)
+    template<typename Func>
+    void for_each_point(Func func) {
+        for (size_t v = 0; v < get_num_points(); v++) {
+            func(v, coords[2*v + 0], coords[2*v + 1]);
+        }
+    }
+
+    // Edge Visitation
+    // Will call func(edge_index, point1_index, point2_index)
+    template<typename Func>
+    void for_each_edge(Func func) {
+        for (size_t e = 0; e < get_num_halfedges(); e++) {
+            // TODO: Will this miss edges on the convex hull since halfedges[e] == INVALID_INDEX
+            if (e > halfedges[e]) {
+                const size_t p = triangles[e];
+                const size_t q = triangles[next_halfedge(e)];
+                func(e, p, q);
+            }
+        }
+    }
+
+    // Triangle Visitation
+    // Will call func(triangle_index, point1_index, point2_index, point3_index)
+    template<typename Func>
+    void for_each_triangle(Func func) {
+        for(size_t t = 0; t < get_num_triangles(); t++) {
+            func( t,
+                get_point_of_triangle(t, 0),
+                get_point_of_triangle(t, 1),
+                get_point_of_triangle(t, 2)
+            );
+        }
+    }
+
+    // Quad Visitation - for each pair of adjacent triangles
+    // Will call func(triangle1_index, triangle2_index, point1_index, point2_index, point3_index, point4_index)
+    template<typename Func>
+    void for_each_quad(Func func) {
+        // We possibly have a quad for every edge
+        // halfedges[e] == -1 for edges on the hull
+        for (size_t e = 0; e < triangles.size(); e++) {
+            const size_t oppe = get_opposite_halfedge(e);
+            if (e > oppe && oppe != INVALID_INDEX) {
+//                // Get the triangles adjacent to e
+//                size_t t1 = triangle_of_edge(e);
+//                size_t t2 = triangle_of_edge(oppe);
+//                size_t p1 = get_point_at_halfedge_start(e);
+//                size_t p2 = get_point_opposite_of_halfedge(e);
+//                size_t p3 = get_point_at_halfedge_start(oppe);
+//                size_t p4 = get_point_opposite_of_halfedge(oppe);
+//                func(e, t1,t2,p1,p2,p3,p4);
+                func(e);
+            }
+        }
+    }
+
+    // Quad is specified by its interior edge
+    template<typename Func>
+    void for_each_adjacent_vertex_of_edge_start(size_t e, Func func) {
+        size_t curr_e = e;
+        func(get_point_at_halfedge_end(curr_e));
+
+        while(true){
+            curr_e = get_opposite_halfedge(next_halfedge(curr_e));
+            if(curr_e != e && curr_e != INVALID_INDEX) {
+                func(get_point_at_halfedge_end(curr_e));
+            }else{
+                break;
+            }
+        }
+    }
+
+    // Quad is specified by one of its two interior halfedges
+    // method will call func(v) for each vertex adjacent to this quad.
+    template<typename Func>
+    void for_each_point_adjacent_quad(size_t e, Func func) {
+        std::set<size_t> pts;
+
+        auto add_pt = [&pts](size_t i){pts.insert(i);};
+
+        const size_t oppe = get_opposite_halfedge(e);
+        if(oppe == INVALID_INDEX) {
+            throw std::invalid_argument("Not a quad");
+        }
+        const size_t nxte = next_halfedge(e);
+        const size_t nxtoppe = next_halfedge(oppe);
+        for_each_adjacent_vertex_of_edge_start(nxte, add_pt);
+        for_each_adjacent_vertex_of_edge_start(prev_halfedge(e), add_pt);
+        for_each_adjacent_vertex_of_edge_start(nxtoppe, add_pt);
+        for_each_adjacent_vertex_of_edge_start(prev_halfedge(oppe), add_pt);
+
+        // Now remove quad points
+        pts.erase(get_point_at_halfedge_start(e));
+        pts.erase(get_point_at_halfedge_start(oppe));
+        pts.erase(get_point_at_halfedge_end(nxte));
+        pts.erase(get_point_at_halfedge_end(nxtoppe));
+
+        for(const auto& v : pts) {
+            func(v);
+        }
+    }
+
+
+    // Expose raw access to arrays (be carefull!)
+    double* coords;
+    size_t num_points;
+
+    // triangles[e] is the point id where the half-edge starts
+    std::vector<std::size_t> triangles;
+
+    // halfedges[e] is the opposite half-edge in the adjacent triangle,
+    // or INVALID_INDEX if there is no adjacent triangle
+    std::vector<std::size_t> halfedges;
+
+    //
+    std::vector<std::size_t> hull_prev;
+    std::vector<std::size_t> hull_next;
+    std::vector<std::size_t> hull_tri;
+    std::size_t hull_start;
+
+private:
+    void triangulate(double *points, size_t num_points);
+
+    std::vector<std::size_t> m_hash;
+    double m_center_x;
+    double m_center_y;
+    std::size_t m_hash_size;
+    std::vector<std::size_t> m_edge_stack;
+
+    std::size_t legalize(std::size_t a);
+    std::size_t hash_key(double x, double y) const;
+    std::size_t add_triangle(
+        std::size_t i0,
+        std::size_t i1,
+        std::size_t i2,
+        std::size_t a,
+        std::size_t b,
+        std::size_t c);
+    void link(std::size_t a, std::size_t b);
+};
+
+/////////////////////////////////////////////////////////////////
+/// Implementation
+/////////////////////////////////////////////////////////////////
 
 //@see https://stackoverflow.com/questions/33333363/built-in-mod-vs-custom-mod-function-improve-the-performance-of-modulus-op/33333636#33333636
 inline size_t fast_mod(const size_t i, const size_t c) {
@@ -100,7 +413,7 @@ inline std::pair<double, double> circumcenter(
 
 struct compare {
 
-    std::vector<double> const& coords;
+    double* coords;
     double cx;
     double cy;
 
@@ -146,9 +459,6 @@ inline bool in_circle(
             ap * (ex * fy - ey * fx)) < 0.0;
 }
 
-constexpr double EPSILON = std::numeric_limits<double>::epsilon();
-constexpr std::size_t INVALID_INDEX = std::numeric_limits<std::size_t>::max();
-
 inline bool check_pts_equal(double x1, double y1, double x2, double y2) {
     return std::fabs(x1 - x2) <= EPSILON &&
            std::fabs(y1 - y2) <= EPSILON;
@@ -160,64 +470,28 @@ inline double pseudo_angle(const double dx, const double dy) {
     return (dy > 0.0 ? 3.0 - p : 1.0 + p) / 4.0; // [0..1)
 }
 
-struct DelaunatorPoint {
-    std::size_t i;
-    double x;
-    double y;
-    std::size_t t;
-    std::size_t prev;
-    std::size_t next;
-    bool removed;
-};
+void Delaunator::triangulate(double* in_coords, const size_t n)
+{
+    // Initialize
+    coords = in_coords;
+    num_points = n;
+    triangles.clear();
+    halfedges.clear();
+    hull_prev.clear();
+    hull_next.clear();
+    hull_tri.clear();
+    hull_start = 0;
+    m_hash.clear();
+    m_center_x = 0;
+    m_center_y = 0;
+    m_hash_size = 0;
+    m_edge_stack.clear();
 
-class Delaunator {
+    if(n == 0) {
+        return;
+    }
 
-public:
-    std::vector<double> const& coords;
-    std::vector<std::size_t> triangles;
-    std::vector<std::size_t> halfedges;
-    std::vector<std::size_t> hull_prev;
-    std::vector<std::size_t> hull_next;
-    std::vector<std::size_t> hull_tri;
-    std::size_t hull_start;
-
-    Delaunator(std::vector<double> const& in_coords);
-
-    double get_hull_area();
-
-private:
-    std::vector<std::size_t> m_hash;
-    double m_center_x;
-    double m_center_y;
-    std::size_t m_hash_size;
-    std::vector<std::size_t> m_edge_stack;
-
-    std::size_t legalize(std::size_t a);
-    std::size_t hash_key(double x, double y) const;
-    std::size_t add_triangle(
-        std::size_t i0,
-        std::size_t i1,
-        std::size_t i2,
-        std::size_t a,
-        std::size_t b,
-        std::size_t c);
-    void link(std::size_t a, std::size_t b);
-};
-
-Delaunator::Delaunator(std::vector<double> const& in_coords)
-    : coords(in_coords),
-      triangles(),
-      halfedges(),
-      hull_prev(),
-      hull_next(),
-      hull_tri(),
-      hull_start(),
-      m_hash(),
-      m_center_x(),
-      m_center_y(),
-      m_hash_size(),
-      m_edge_stack() {
-    std::size_t n = coords.size() >> 1;
+    // Compute
 
     double max_x = std::numeric_limits<double>::min();
     double max_y = std::numeric_limits<double>::min();
